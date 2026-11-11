@@ -1,0 +1,59 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*\$py.class
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Environment / secrets
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Model files / checkpoints
+models/checkpoints/
+models/trained/
+*.pt
+*.pth
+*.ckpt
+
+# Outputs / generated results
+outputs/
+results/
+runs/
+
+# Data folders
+data/raw/
+data/interim/
+data/processed/
+
+# Optional: keep metadata tracked
+!data/metadata/
+!data/metadata/*.csv
+
+# Temporary files
+*.tmp
+*.temp
+
+# Test / coverage
+.coverage
+.pytest_cache/
+
+# Build files
+build/
+dist/
+*.egg-info/
