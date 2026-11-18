@@ -1,101 +1,176 @@
+import csv
 import os
+
 import cv2
 import numpy as np
 import mediapipe as mp
 
 from src.config import (
-    RAW_ASL_PATH,
+    RAW_ASL_HF_PATH,
+    RAW_ASL_WLASL_PATH,
     PROCESSED_ASL_PATH,
+    RAW_SGSL_PATH,
+    PROCESSED_SGSL_PATH,
+    signs,
     sequence_length,
-    FEATURE_DIM,
     MIN_DETECTION_CONFIDENCE,
     MIN_TRACKING_CONFIDENCE,
 )
 from src.mediapipe_utils import mediapipe_detection, extractk
 
-mp_holistic = mp.solutions.holistic
+VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".webm")
 
-def get_video_files(folder):
-    exts = (".mp4", ".avi", ".mov", ".mkv", ".webm")
-    return sorted([f for f in os.listdir(folder) if f.lower().endswith(exts)])
+def list_videos(folder):
+    """Return video paths directly inside a folder, in a stable order."""
+    if not os.path.isdir(folder):
+        return []
 
-def sample_frame_indices(total_frames, seq_len):
-    if total_frames <= 0:
-        return [0] * seq_len
+    return [
+        os.path.join(folder, filename)
+        for filename in sorted(os.listdir(folder))
+        if filename.lower().endswith(VIDEO_EXTENSIONS)
+    ]
 
-    if total_frames >= seq_len:
-        return np.linspace(0, total_frames - 1, seq_len, dtype=int).tolist()
-
-    indices = list(range(total_frames))
-    while len(indices) < seq_len:
-        indices.append(total_frames - 1)
-    return indices
-
-def load_all_frames(video_path):
+def sample_video_frames(video_path, number_of_frames):
+    """Sample a fixed number of evenly spaced frames from a video."""
     cap = cv2.VideoCapture(video_path)
 
     if not cap.isOpened():
-        print(f"[WARNING] Could not open video: {video_path}")
-        return []
+        print(f"Could not open video: {video_path}")
+        cap.release()
+        return None
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    if frame_count <= 0:
+        print(f"Video has no readable frames: {video_path}")
+        cap.release()
+        return None
+
+    frame_indices = np.linspace(
+        0, frame_count - 1, number_of_frames, dtype=int
+    )
 
     frames = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    for frame_index in frame_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
+        success, frame = cap.read()
+
+        if not success:
+            print(f"Could not read frame {frame_index} from {video_path}")
+            cap.release()
+            return None
+
         frames.append(frame)
 
     cap.release()
     return frames
 
-def extract_video_keypoints(video_path, holistic, seq_len):
-    frames = load_all_frames(video_path)
+def extract_sequence(video_path, holistic):
+    """Convert one video into a fixed-length sequence of keypoints."""
+    frames = sample_video_frames(video_path, sequence_length)
 
-    if len(frames) == 0:
-        return np.zeros((seq_len, FEATURE_DIM), dtype=np.float32)
+    if frames is None:
+        return None
 
-    frame_indices = sample_frame_indices(len(frames), seq_len)
+    sequence = []
 
-    keypoint_sequence = []
-    for idx in frame_indices:
-        frame = frames[idx]
+    for frame in frames:
         _, results = mediapipe_detection(frame, holistic)
         keypoints = extractk(results)
-        keypoint_sequence.append(keypoints)
 
-    return np.array(keypoint_sequence, dtype=np.float32)
+        if keypoints.shape[0] != 1662:
+            print(
+                f"Unexpected feature count in {video_path}: "
+                f"{keypoints.shape[0]}"
+            )
+            return None
+
+        sequence.append(keypoints)
+
+    return np.asarray(sequence, dtype=np.float32)
+
+def next_sequence_id(sign_output_dir):
+    """Return the next unused numeric sequence ID for a sign."""
+    os.makedirs(sign_output_dir, exist_ok=True)
+
+    existing_ids = [
+        int(name)
+        for name in os.listdir(sign_output_dir)
+        if name.isdigit()
+        and os.path.isdir(os.path.join(sign_output_dir, name))
+    ]
+
+    return max(existing_ids, default=-1) + 1
+
+def save_sequence(sequence, sign_output_dir, sequence_id):
+    """Save one sequence as numbered per-frame NumPy files."""
+    sequence_dir = os.path.join(sign_output_dir, str(sequence_id))
+    os.makedirs(sequence_dir, exist_ok=False)
+
+    for frame_number, keypoints in enumerate(sequence):
+        frame_path = os.path.join(sequence_dir, f"{frame_number}.npy")
+        np.save(frame_path, keypoints)
+
+def process_datasets(source_dirs, output_dir, selected_signs):
+    """Process videos from multiple sources into one output directory."""
+    os.makedirs(output_dir, exist_ok=True)
+    manifest_path = os.path.join(output_dir, "manifest.csv")
+    manifest_exists = os.path.exists(manifest_path)
+
+    with mp.solutions.holistic.Holistic(
+        min_detection_confidence=MIN_DETECTION_CONFIDENCE,
+        min_tracking_confidence=MIN_TRACKING_CONFIDENCE,
+    ) as holistic:
+        with open(manifest_path, "a", newline="", encoding="utf-8") as manifest_file:
+            writer = csv.writer(manifest_file)
+
+            if not manifest_exists:
+                writer.writerow(["sign", "sequence_id", "source_video"])
+
+            for sign in selected_signs:
+                sign_output_dir = os.path.join(output_dir, sign)
+                sequence_id = next_sequence_id(sign_output_dir)
+
+                for source_name, source_dir in source_dirs:
+                    sign_input_dir = os.path.join(source_dir, sign)
+                    video_paths = list_videos(sign_input_dir)
+
+                    print(
+                        f"{source_name} | {sign}: "
+                        f"found {len(video_paths)} videos"
+                    )
+
+                    for video_path in video_paths:
+                        print(f"Processing: {video_path}")
+                        sequence = extract_sequence(video_path, holistic)
+
+                        if sequence is None:
+                            print("Skipped.")
+                            continue
+
+                        save_sequence(sequence, sign_output_dir, sequence_id)
+                        writer.writerow([sign, sequence_id, video_path])
+                        manifest_file.flush()
+
+                        print(f"Saved as {sign}/{sequence_id}")
+                        sequence_id += 1
 
 if __name__ == "__main__":
-    os.makedirs(PROCESSED_ASL_PATH, exist_ok=True)
+    asl_sources = [
+        ("asl_hf", RAW_ASL_HF_PATH),
+        ("asl_wlasl", RAW_ASL_WLASL_PATH),
+    ]
 
-    with mp_holistic.Holistic(
-        min_detection_confidence=MIN_DETECTION_CONFIDENCE,
-        min_tracking_confidence=MIN_TRACKING_CONFIDENCE
-    ) as holistic:
+    process_datasets(
+        source_dirs=asl_sources,
+        output_dir=PROCESSED_ASL_PATH,
+        selected_signs=list(signs),
+    )
 
-        for sign in sorted(os.listdir(RAW_ASL_PATH)):
-            sign_path = os.path.join(RAW_ASL_PATH, sign)
-
-            if not os.path.isdir(sign_path):
-                continue
-
-            save_sign_dir = os.path.join(PROCESSED_ASL_PATH, sign)
-            os.makedirs(save_sign_dir, exist_ok=True)
-
-            video_files = get_video_files(sign_path)
-            print(f"\nProcessing sign: {sign} | videos found: {len(video_files)}")
-
-            for sequence_num, video_file in enumerate(video_files):
-                video_path = os.path.join(sign_path, video_file)
-                print(f"  Processing video {sequence_num}: {video_file}")
-
-                keypoint_sequence = extract_video_keypoints(
-                    video_path,
-                    holistic,
-                    sequence_length
-                )
-
-                save_path = os.path.join(save_sign_dir, f"{sequence_num}.npy")
-                np.save(save_path, keypoint_sequence)
-
-    print("\nDone processing all videos.")
+    # SGSL
+    # process_datasets(
+    #     source_dirs=[("sgsl", RAW_SGSL_PATH)],
+    #     output_dir=PROCESSED_SGSL_PATH,
+    #     selected_signs=list(signs),
+    # )
