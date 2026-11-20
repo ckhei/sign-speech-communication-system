@@ -2,7 +2,7 @@ import os
 import numpy as np
 
 RAW_ASL_HF_PATH = os.path.join("data", "raw", "asl_hf")
-RAW_ASL_WLASL_PATH = os.path.join("data", "raw", "asl")
+RAW_ASL_WLASL_PATH = os.path.join("data", "raw", "asl_wlasl")
 PROCESSED_ASL_PATH = os.path.join("data", "processed", "asl")
 
 RAW_SGSL_PATH = os.path.join("data", "raw", "sgsl")
